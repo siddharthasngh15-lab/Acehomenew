@@ -435,13 +435,34 @@ const WalletTransactionSchema = new mongoose.Schema(
   baseOptions
 );
 
-// Serviceability configuration
-const SERVICEABLE_CITY = 'Gorakhpur';
-const SERVICEABLE_PINCODES = ['273001', '273002', '273003', '273004', '273005'];
+// Serviceability configuration - now uses database
+// Legacy hardcoded values for fallback
+const DEFAULT_SERVICEABLE_CITY = 'Gorakhpur';
+const DEFAULT_SERVICEABLE_PINCODES = ['273001', '273002', '273003', '273004', '273005'];
 
-const isServiceable = (pincode) => {
+// Check if pincode is serviceable using database
+const isServiceable = async (pincode) => {
   if (!pincode) return false;
-  return SERVICEABLE_PINCODES.includes(pincode.toString().trim());
+  const trimmedPincode = pincode.toString().trim();
+  
+  try {
+    // Check database for active serviceability areas
+    const areas = await ServiceabilityArea.find({ is_active: true });
+    for (const area of areas) {
+      if (area.pincodes && area.pincodes.includes(trimmedPincode)) {
+        return true;
+      }
+    }
+    // Fallback to default if no areas found in database
+    if (areas.length === 0) {
+      return DEFAULT_SERVICEABLE_PINCODES.includes(trimmedPincode);
+    }
+    return false;
+  } catch (error) {
+    console.error('Error checking serviceability:', error);
+    // Fallback to default on error
+    return DEFAULT_SERVICEABLE_PINCODES.includes(trimmedPincode);
+  }
 };
 
 // OTP Schema for phone/email verification
@@ -775,12 +796,14 @@ app.post(
 
       if (!profile) {
         // No existing profile: create a new customer account
+        // Phone is verified via OTP before registration, so mark it as verified
         profile = await Profile.create({
           phone,
           full_name,
           email,
           role: 'customer',
           password_hash,
+          phone_verified: true, // Phone verified via OTP before registration
           email_verified: false,
           email_verification_token,
           email_verification_expires_at,
@@ -791,6 +814,7 @@ app.post(
         profile.full_name = full_name || profile.full_name;
         profile.email = email || profile.email;
         profile.password_hash = password_hash;
+        profile.phone_verified = true; // Phone verified via OTP before registration
         profile.email_verified = false;
         profile.email_verification_token = email_verification_token;
         profile.email_verification_expires_at = email_verification_expires_at;
@@ -896,9 +920,11 @@ app.post(
           // Don't change approval_status - keep it as 'approved' or undefined
           // This prevents approved employees from disappearing when someone else applies with the same phone
         } else {
-          // New application or rejected/pending - update to requested role and set to pending
-          existingProfile.role = requestedRole;
+          // New application or rejected/pending - ALWAYS update to worker role and set to pending
+          // CRITICAL: Even if they're currently a customer, set role to 'worker' when they apply as technician
+          existingProfile.role = 'worker'; // Always set to 'worker' for technician applications
           existingProfile.approval_status = 'pending';
+          console.log(`[Worker Application] Updated existing profile from role '${currentRole}' to 'worker' with pending status`);
         }
         existingProfile.full_name = sanitizeInput(full_name);
         existingProfile.email = sanitizeInput(email.toLowerCase());
@@ -1239,9 +1265,31 @@ app.get(`${apiBase}/auth/verify-email`, async (req, res) => {
 // Admin: list pending technician applications
 app.get(`${apiBase}/admin/technicians/pending`, requireAdmin, async (_req, res) => {
   try {
+    // Find profiles with pending approval_status
+    // Include profiles with:
+    // 1. role 'worker' or 'employee' AND approval_status 'pending', OR
+    // 2. approval_status 'pending' (regardless of role - for new applicants who haven't been assigned role yet)
+    // This ensures all pending technician applications are shown, even if role hasn't been updated yet
     const technicians = await Profile.find({
-      role: { $in: ['employee', 'worker'] },
-      approval_status: 'pending',
+      $or: [
+        {
+          role: { $in: ['employee', 'worker'] },
+          approval_status: 'pending',
+        },
+        {
+          approval_status: 'pending',
+          // Exclude regular customers who haven't applied (they shouldn't have approval_status set)
+          role: { $ne: 'customer' },
+        },
+        {
+          // Also include profiles with pending status even if role is null/undefined (new applicants)
+          approval_status: 'pending',
+          $or: [
+            { role: { $exists: false } },
+            { role: null },
+          ],
+        },
+      ],
     }).sort({ created_at: -1 });
 
     console.log(`[Pending Technicians] Found ${technicians.length} pending applications`);
@@ -1297,6 +1345,26 @@ app.post(`${apiBase}/admin/technicians/:id/approve`, requireAdmin, async (req, r
           <p>Welcome to the team!<br><strong>ACE Home Solutions</strong></p>
         `,
       });
+    }
+
+    // Send WhatsApp notification
+    if (profile.phone) {
+      try {
+        await sendNotification({
+          to: profile.phone,
+          type: 'whatsapp',
+          message: `Hello! ${profile.full_name || 'there'}\n\nCongratulations! Your application to join ACE Home Solutions as a technician has been approved. You can now log in to your account and start accepting jobs.\n\nThank you for choosing ACE Home Solutions!`,
+          userId: profile._id,
+          metadata: {
+            type: 'technician_approval',
+            technician_id: profile._id.toString()
+          },
+        });
+        console.log(`✅ WhatsApp notification sent to technician ${profile._id}`);
+      } catch (whatsappError) {
+        console.error('⚠️ Failed to send WhatsApp notification:', whatsappError);
+        // Don't fail the approval if WhatsApp fails
+      }
     }
 
     res.json({ success: true, profile });
@@ -2299,7 +2367,7 @@ app.post(
 
     // Backend serviceability validation
     const pincode = customer_pincode || customer_address?.pincode;
-    if (!isServiceable(pincode)) {
+    if (!(await isServiceable(pincode))) {
       return res.status(400).json({ 
         error: 'service_not_available', 
         message: 'Services are not available in your area yet. Please check back soon!' 
@@ -2963,7 +3031,7 @@ app.patch(
 
       // Validate serviceability for new date
       const pincode = booking.customer_pincode || booking.customer_address?.pincode;
-      if (!isServiceable(pincode)) {
+      if (!(await isServiceable(pincode))) {
         return res.status(400).json({ 
           error: 'service_not_available', 
           message: 'Services are not available in your area yet.' 
@@ -3168,7 +3236,27 @@ app.delete(`${apiBase}/promo/:id`, requireAdmin, async (req, res) => {
   }
 });
 
-// Public endpoint to get active promo codes (for display on frontend)
+// Public endpoint to get all active promo codes (for customers to view)
+app.get(`${apiBase}/promo/active/all`, async (req, res) => {
+  try {
+    const now = new Date();
+    const activePromos = await PromoCode.find({
+      is_active: true,
+      valid_from: { $lte: now },
+      $or: [
+        { valid_until: { $gte: now } },
+        { valid_until: null },
+      ],
+    }).sort({ created_at: -1 });
+    
+    res.json(activePromos);
+  } catch (err) {
+    console.error('Get all active promos error:', err);
+    res.status(500).json({ error: 'get_active_promos_error', message: err.message });
+  }
+});
+
+// Public endpoint to get single active promo code (for display on frontend)
 app.get(`${apiBase}/promo/active`, async (req, res) => {
   try {
     const now = new Date();
@@ -3948,17 +4036,19 @@ app.post(`${apiBase}/wallet/transactions`, requireAdmin, async (req, res) => {
   }
 });
 
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    error: 'internal_server_error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred',
-  });
+// Serviceability Areas Management - ALL routes must be before error handler
+// Get all serviceability areas (public - only active areas)
+app.get(`${apiBase}/serviceability-areas/public`, async (req, res) => {
+  try {
+    const areas = await ServiceabilityArea.find({ is_active: true }).sort({ city: 1 });
+    res.json(areas);
+  } catch (err) {
+    console.error('Get public serviceability areas error:', err);
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
-// Serviceability Areas Management
-// Get all serviceability areas
+// Get all serviceability areas (admin only - includes inactive)
 app.get(`${apiBase}/serviceability-areas`, requireAdmin, async (req, res) => {
   try {
     const areas = await ServiceabilityArea.find().sort({ city: 1 });
@@ -4068,7 +4158,16 @@ app.delete(`${apiBase}/serviceability-areas/:id`, requireAdmin, async (req, res)
   }
 });
 
-// 404 handler
+// Global error handler - MUST be after all routes but before 404 handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    error: 'internal_server_error',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred',
+  });
+});
+
+// 404 handler - MUST be last, after all routes and error handler
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found', message: `Route ${req.path} not found` });
 });

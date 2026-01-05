@@ -279,13 +279,16 @@ const sendViaMSG91 = async (to, message) => {
       formattedTo = '91' + formattedTo;
     }
 
-    // MSG91 WhatsApp API - Official format from documentation
-    // Documentation: https://docs.msg91.com/whatsapp
-    // Endpoint: POST /api/v5/whatsapp/whatsapp-outbound-message/
-    const url = `https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/`;
+    // For booking updates, use bulk format directly (it works better with template variables)
+    // For OTP, we can try simple format first, but booking updates need bulk format
+    if (!isOTP) {
+      // Booking updates: Use bulk format directly
+      console.log(`📤 MSG91 WhatsApp: Using bulk format for booking update to ${formattedTo}`);
+      return await sendViaMSG91Bulk(to, message, authKey, whatsappNumber, templateName, templateNamespace);
+    }
 
-    // MSG91 WhatsApp API format (official documentation format)
-    // Try simple format first
+    // OTP: Try simple format first, fallback to bulk if needed
+    const url = `https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/`;
     const requestBody = {
       template_id: templateName,
       recipient: formattedTo,
@@ -294,18 +297,10 @@ const sendViaMSG91 = async (to, message) => {
       }
     };
 
-    console.log(`📤 MSG91 WhatsApp API Request:`, JSON.stringify({
-      ...requestBody,
-      payload: {
-        ...requestBody.payload,
-        template: {
-          ...requestBody.payload.template,
-          to_and_components: [{
-            to: ['HIDDEN'],
-            components: requestBody.payload.template.to_and_components[0].components
-          }]
-        }
-      }
+    console.log(`📤 MSG91 WhatsApp API Request (OTP):`, JSON.stringify({
+      template_id: requestBody.template_id,
+      recipient: requestBody.recipient,
+      variables: { '1': 'HIDDEN' } // Hide actual OTP value
     }, null, 2));
 
     let response = await fetch(url, {
