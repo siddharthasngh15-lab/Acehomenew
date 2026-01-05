@@ -2265,8 +2265,9 @@ app.get(`${apiBase}/reviews/booking/:bookingId`, async (req, res) => {
       .populate('service_id', 'name')
       .populate('employee_id', 'full_name');
     
+    // Return null instead of 404 - "no review" is a valid state, not an error
     if (!review) {
-      return res.status(404).json({ error: 'review_not_found' });
+      return res.status(200).json(null);
     }
     
     res.json(review);
