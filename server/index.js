@@ -2588,6 +2588,12 @@ app.patch(`${apiBase}/bookings/:id/status`, async (req, res) => {
       
     if (!booking) return res.status(404).json({ error: 'not_found' });
 
+    // Auto-update payment status for COD bookings when status changes to completed
+    if (status === 'completed' && booking.payment_method === 'cod' && booking.payment_status === 'pending') {
+      updateData.payment_status = 'paid';
+      console.log(`[Update Status] Auto-updated payment_status to 'paid' for COD booking ${booking._id}`);
+    }
+
     const oldStatus = booking.status;
     const updatedBooking = await Booking.findByIdAndUpdate(req.params.id, updateData, { new: true })
       .populate('service_id', 'name')
@@ -3477,6 +3483,13 @@ app.post(`${apiBase}/bookings/:id/complete`, async (req, res) => {
     
     booking.status = 'completed';
     booking.completed_at = new Date();
+    
+    // Auto-update payment status for COD bookings when work is completed
+    // For COD, payment is collected when service is delivered/completed
+    if (booking.payment_method === 'cod' && booking.payment_status === 'pending') {
+      booking.payment_status = 'paid';
+      console.log(`[Complete Booking] Auto-updated payment_status to 'paid' for COD booking ${booking._id}`);
+    }
     
     if (before_photos && Array.isArray(before_photos)) {
       booking.before_photos = before_photos;
