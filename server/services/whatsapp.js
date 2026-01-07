@@ -345,6 +345,116 @@ const sendViaMSG91 = async (to, message) => {
 };
 
 /**
+ * Send admin booking notification via MSG91 WhatsApp (uses dedicated template)
+ * @param {string} to - Admin phone number (format: 919876543210)
+ * @param {Object} bookingData - Booking data object
+ * @param {string} bookingData.bookingId - Booking ID (optional)
+ * @returns {Promise<{success: boolean, messageId?: string, error?: string}>}
+ */
+export const sendAdminBookingNotification = async (to, bookingData) => {
+  const provider = process.env.WHATSAPP_PROVIDER || 'twilio';
+  
+  // Only MSG91 supports templates, for other providers use plain message
+  if (provider !== 'msg91') {
+    // Fallback to plain message for Twilio/Meta
+    const message = bookingData.bookingId 
+      ? `🔔 You have received a new booking.\n\nBooking ID: ${bookingData.bookingId}\n\nPlease check the admin panel for details.`
+      : `🔔 You have received a new booking.\n\nPlease check the admin panel for details.`;
+    return await sendWhatsApp(to, message);
+  }
+
+  try {
+    const authKey = process.env.MSG91_AUTH_KEY;
+    const whatsappNumber = process.env.MSG91_WHATSAPP_NUMBER || '919044393026';
+    const templateName = process.env.MSG91_WHATSAPP_TEMPLATE_ID_ADMIN_BOOKING || 'admin_booking_notification';
+    const templateNamespace = process.env.MSG91_WHATSAPP_TEMPLATE_NAMESPACE || 'd665571e_4189_4728_9deb_e40e60213c3d';
+    const templateLanguage = process.env.MSG91_WHATSAPP_TEMPLATE_LANGUAGE || 'en';
+
+    if (!authKey) {
+      console.warn('⚠️ MSG91_AUTH_KEY not set. Admin WhatsApp notification will not be sent.');
+      return { success: false, error: 'MSG91_AUTH_KEY not configured' };
+    }
+
+    // Format recipient number
+    let formattedTo = to.replace(/[\s\+]/g, '');
+    if (!formattedTo.startsWith('91') && formattedTo.length === 10) {
+      formattedTo = '91' + formattedTo;
+    }
+
+    // Build template components - simple notification with optional booking ID
+    // Template can have 0 or 1 variable (booking ID is optional)
+    // Check if template expects variables by checking env variable
+    // Default to false (no variables) to match Option 1 template
+    const templateHasVariables = process.env.MSG91_ADMIN_BOOKING_TEMPLATE_HAS_VARIABLES === 'true';
+    
+    const url = `https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/`;
+    
+    // Build request body - MSG91 requires components object even if empty
+    const toAndComponents = {
+      to: [formattedTo],
+      components: {} // Always include components, even if empty
+    };
+    
+    // Only add component values if template has variables (for templates with variables)
+    // If template has 0 variables (Option 1), components remains empty {}
+    if (templateHasVariables && bookingData.bookingId) {
+      toAndComponents.components = {
+        body_1: { type: 'text', value: bookingData.bookingId }
+      };
+    }
+    
+    const requestBody = {
+      integrated_number: whatsappNumber,
+      content_type: 'template',
+      payload: {
+        messaging_product: 'whatsapp',
+        type: 'template',
+        template: {
+          name: templateName,
+          language: {
+            code: templateLanguage,
+            policy: 'deterministic'
+          },
+          namespace: templateNamespace,
+          to_and_components: [toAndComponents]
+        }
+      }
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'authkey': authKey,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const responseText = await response.text();
+    let data;
+    
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      return { success: false, error: responseText || 'Failed to send admin WhatsApp notification' };
+    }
+
+    if (response.ok && (data.status === 'success' || data.type === 'success' || data.request_id || data.message_id)) {
+      const messageId = data.request_id || data.message_id || 'N/A';
+      console.log(`✅ MSG91 Admin WhatsApp notification sent to ${formattedTo} - Request ID: ${messageId}`);
+      return { success: true, messageId: messageId };
+    } else {
+      const errorMsg = data.message || data.error || data.data?.message || JSON.stringify(data);
+      return { success: false, error: errorMsg };
+    }
+  } catch (error) {
+    console.error('MSG91 Admin WhatsApp notification error:', error);
+    return { success: false, error: error.message || 'Failed to send admin WhatsApp notification' };
+  }
+};
+
+/**
  * Send WhatsApp message (auto-selects provider based on env)
  * @param {string} to - Recipient phone number
  * @param {string} message - Message to send

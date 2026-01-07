@@ -2366,14 +2366,8 @@ app.post(
     try {
       const { customer_pincode, customer_address, booking_date, booking_time, service_id } = req.body;
 
-    // Backend serviceability validation
+    // Pincode serviceability check removed - services available for whole Gorakhpur city
     const pincode = customer_pincode || customer_address?.pincode;
-    if (!(await isServiceable(pincode))) {
-      return res.status(400).json({ 
-        error: 'service_not_available', 
-        message: 'Services are not available in your area yet. Please check back soon!' 
-      });
-    }
 
     // Validate required fields
     if (!service_id || !booking_date || !booking_time) {
@@ -2502,6 +2496,27 @@ app.post(
         promo.usage_count = (promo.usage_count || 0) + 1;
         await promo.save();
       }
+    }
+
+    // Send WhatsApp notification to admin for new booking
+    try {
+      const bookingId = booking._id.toString().slice(-8).toUpperCase();
+      const adminPhone = process.env.ADMIN_WHATSAPP_NUMBER || '9794163992'; // Admin WhatsApp number
+      
+      // Use dedicated admin notification function (supports MSG91 templates)
+      const { sendAdminBookingNotification } = await import('./services/whatsapp.js');
+      const notifResult = await sendAdminBookingNotification(adminPhone, {
+        bookingId // Optional: only send booking ID if template requires it
+      });
+      
+      if (notifResult.success) {
+        console.log(`✅ WhatsApp notification sent to admin (${adminPhone}) for new booking ${bookingId}`);
+      } else {
+        console.error(`⚠️ Failed to send admin notification: ${notifResult.error}`);
+      }
+    } catch (notifError) {
+      // Don't fail booking creation if notification fails
+      console.error('⚠️ Failed to send admin notification for new booking:', notifError);
     }
 
     res.json(booking);
